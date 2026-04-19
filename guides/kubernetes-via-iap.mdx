@@ -1,0 +1,197 @@
+---
+title: "Manage Kubernetes resources on a private GCP cluster via IAP"
+description: "Use the iap or kubeproxy Terraform provider to manage Kubernetes resources on a private GCP cluster accessed through an IAP bastion host tunnel."
+---
+
+Two providers let you manage Kubernetes resources on a private GCP cluster through an IAP bastion host: the **iap provider**, which exposes a standalone proxy resource that you pass to the standard `kubernetes` provider, and the **kubeproxy provider**, which embeds the IAP tunnel inside the provider itself so you use `kubeproxy_*` resources directly without a separate proxy step.
+
+## Approach 1 — iap provider with the standard kubernetes provider
+
+Use this approach when you need a single IAP tunnel shared across multiple downstream providers (for example, both `kubernetes` and `helm` in the same root module), or when you want fine-grained control over the proxy lifecycle.
+
+<Steps>
+  <Step title="Configure the iap provider">
+    Add the `iap` provider to your `required_providers` block and an empty `provider "iap" {}` block. The provider itself has no configuration; all settings are on the resource.
+
+    ```hcl terraform.tf
+    terraform {
+      required_providers {
+        iap = {
+          version = "~> 1.0.0"
+          source  = "example-iap.com/provider/iap"
+        }
+      }
+    }
+
+    provider "iap" {}
+    ```
+  </Step>
+
+  <Step title="Create the iap_tunnel_proxy resource">
+    The `iap_tunnel_proxy` resource opens an IAP tunnel to your bastion host and exposes the resulting local proxy address as `proxy_url`.
+
+    ```hcl main.tf
+    resource "iap_tunnel_proxy" "tunnel_proxy" {
+      zone        = var.zone
+      instance    = var.instance
+      interface   = var.interface
+      project     = var.project
+      remote_port = var.remote_port
+    }
+
+    output "tunnel_proxy" {
+      value = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+    }
+    ```
+
+    All five arguments are required. `remote_port` should match the port that tinyproxy (or your chosen HTTP proxy daemon) listens on inside the bastion host. The default is `8888`.
+  </Step>
+
+  <Step title="Pass proxy_url to the kubernetes provider">
+    Set the `proxy_url` field of the `kubernetes` provider to the computed output from the tunnel resource. Authenticate using a short-lived service account access token from the `google` provider.
+
+    ```hcl main.tf
+    provider "google" {}
+
+    data "google_service_account_access_token" "kube_sa" {
+      target_service_account = var.service_account
+      lifetime               = "1000s"
+      scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email"
+      ]
+    }
+
+    provider "kubernetes" {
+      host           = ""
+      token          = data.google_service_account_access_token.kube_sa.access_token
+      proxy_url      = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+      config_path    = var.config_path
+      config_context = var.config_context
+    }
+    ```
+  </Step>
+
+  <Step title="Add depends_on to your Kubernetes resources">
+    Because the `kubernetes` provider configuration is evaluated before resources run, add an explicit `depends_on` referencing the tunnel resource on each Kubernetes resource. This ensures the proxy is ready before any API calls are made.
+
+    ```hcl main.tf
+    data "kubernetes_storage_class" "example" {
+      metadata {
+        name = "terraform-example"
+      }
+
+      depends_on = [resource.iap_tunnel_proxy.tunnel_proxy]
+    }
+    ```
+  </Step>
+</Steps>
+
+## Approach 2 — kubeproxy provider (integrated tunnel)
+
+Use this approach for simpler configurations where you only need Kubernetes resources and want the tunnel managed entirely inside the provider without a separate proxy resource.
+
+<Steps>
+  <Step title="Configure the kubeproxy provider">
+    All IAP tunnel parameters and Kubernetes credentials go directly in the `provider` block. There is no separate resource to create.
+
+    ```hcl main.tf
+    terraform {
+      required_providers {
+        kubeproxy = {
+          version = "~> 1.0.0"
+          source  = "example-kube.com/provider/kubeproxy"
+        }
+      }
+    }
+
+    provider "google" {}
+
+    data "google_service_account_access_token" "kube_sa" {
+      target_service_account = var.service_account
+      lifetime               = "1000s"
+      scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email"
+      ]
+    }
+
+    provider "kubeproxy" {
+      instance    = var.instance
+      zone        = var.zone
+      interface   = var.interface
+      project     = var.project
+      remote_port = var.remote_port
+
+      host           = ""
+      token          = data.google_service_account_access_token.kube_sa.access_token
+      config_path    = var.config_path
+      config_context = var.config_context
+    }
+    ```
+  </Step>
+
+  <Step title="Use kubeproxy_* resources directly">
+    All `kubeproxy_*` resources mirror their `kubernetes_*` counterparts. You do not need `depends_on` on the tunnel — the provider manages it internally.
+
+    ```hcl main.tf
+    resource "kubeproxy_secret" "example" {
+      metadata {
+        name = "basic-auth"
+      }
+
+      data = {
+        username = "admin"
+        password = "P4ssw0rd"
+      }
+
+      type = "kubernetes.io/basic-auth"
+    }
+
+    data "kubeproxy_resource" "example" {
+      api_version = "v1"
+      kind        = "ConfigMap"
+
+      metadata {
+        name      = "example"
+        namespace = "default"
+      }
+    }
+
+    output "test" {
+      value = data.kubeproxy_resource.example.object.data.TEST
+    }
+    ```
+  </Step>
+</Steps>
+
+## Choosing an approach
+
+| | iap + kubernetes | kubeproxy |
+|---|---|---|
+| **Shared tunnel** | Yes — one `iap_tunnel_proxy` can feed multiple providers | No — tunnel is private to the provider |
+| **Explicit `depends_on`** | Required on every resource | Not required |
+| **Provider complexity** | Two providers to configure | One provider block |
+| **kubernetes_manifest support** | Yes (standard kubernetes provider) | No |
+| **Best for** | Multi-provider setups, shared proxy URL | Simple Kubernetes-only configurations |
+
+<Warning>
+The `kubeproxy` provider does not support `kubernetes_manifest`. If you need to apply raw Kubernetes YAML manifests, use the `iap` provider with the standard `kubernetes` provider, or consider the [kubectl Terraform provider](https://registry.terraform.io/providers/gavinbunney/kubectl/latest) pointed at the `proxy_url` output.
+</Warning>
+
+<Note>
+For operations that take longer than the default `terraform apply` timeout, use the `iap_tunnel_keep_alive` data source to hold the IAP tunnel open. Set `timeout` to the number of seconds you need the tunnel to stay alive, and reference the tunnel resource's `proxy_url`.
+
+```hcl main.tf
+data "iap_tunnel_keep_alive" "keep_alive" {
+  timeout   = 100
+  proxy_url = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+
+  for_each = {
+    timestamp = "${timestamp()}"
+  }
+}
+```
+
+The data source polls the proxy every 5 seconds and returns only after `timeout` seconds have elapsed, preventing Terraform from tearing down the tunnel prematurely.
+</Note>

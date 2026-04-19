@@ -1,0 +1,206 @@
+---
+title: "tfcore schema, tunnel, and wrapper utility functions"
+description: "Reference for CombineSchemas, StartTunnel, WrapSchemaResource, UpdateSchemaWithDefaults, and MustCombineMaps from the tfcore utils package."
+---
+
+The `utils` package (`github.com/synapsecns/sanguine/contrib/tfcore/utils`) contains the five functions and two types that every Synapse Terraform provider relies on for schema composition, IAP tunnel management, and transparent provider wrapping. All exported identifiers are described below with their exact signatures extracted from the source.
+
+## `CombineSchemas`
+
+```go
+func CombineSchemas(googleProvider, underlyingProvider *schema.Provider, toReplace, replaceWith string) (co CombinedSchema)
+```
+
+`CombineSchemas` merges a Google provider and an underlying provider into a single `CombinedSchema`. It is the primary entry point for building a combined Terraform provider from two existing providers.
+
+<ParamField path="googleProvider" type="*schema.Provider" required>
+  The Google provider instance whose `Schema` and `ProviderMetaSchema` fields are merged into the combined schema. Must contain `project` and `zone` fields (required by `UpdateSchemaWithDefaults`).
+</ParamField>
+
+<ParamField path="underlyingProvider" type="*schema.Provider" required>
+  The underlying provider (for example, the Kubernetes or Helm provider) whose resources, data sources, and meta schema are merged in. All resource and data source keys are renamed before being wrapped.
+</ParamField>
+
+<ParamField path="toReplace" type="string" required>
+  The substring in each resource and data source key that will be replaced. Replacement uses `strings.Replace` with a count of `1`, so only the first occurrence in each key is substituted.
+</ParamField>
+
+<ParamField path="replaceWith" type="string" required>
+  The string that replaces the first occurrence of `toReplace` in each resource and data source key.
+</ParamField>
+
+**Returns** a `CombinedSchema` value containing the merged `Schema`, `MetaSchema`, `ResourceMap`, and `DataSourceMap`.
+
+**Behavior:**
+
+1. Calls `MustCombineMaps` on `googleProvider.Schema` and `underlyingProvider.Schema` to produce `co.Schema`.
+2. Calls `MustCombineMaps` on `googleProvider.ProviderMetaSchema` and `underlyingProvider.ProviderMetaSchema` to produce `co.MetaSchema`.
+3. Iterates over `underlyingProvider.ResourcesMap`, renames each key with `strings.Replace(key, toReplace, replaceWith, 1)`, and wraps the resource with `WrapSchemaResource`.
+4. Repeats step 3 for `underlyingProvider.DataSourcesMap`.
+5. Calls `UpdateSchemaWithDefaults(co.Schema)` to inject the IAP tunnel fields.
+
+---
+
+## `CombinedSchema`
+
+```go
+type CombinedSchema struct {
+    Schema     map[string]*schema.Schema
+    MetaSchema map[string]*schema.Schema
+
+    ResourceMap, DataSourceMap map[string]*schema.Resource
+}
+```
+
+`CombinedSchema` holds the output of `CombineSchemas`. It is the merged representation of the Google and underlying provider schemas, ready to be assigned to a `schema.Provider`.
+
+| Field | Type | Description |
+|---|---|---|
+| `Schema` | `map[string]*schema.Schema` | The merged provider-level schema, with IAP tunnel fields added by `UpdateSchemaWithDefaults`. |
+| `MetaSchema` | `map[string]*schema.Schema` | The merged provider meta schema. |
+| `ResourceMap` | `map[string]*schema.Resource` | All resources from the underlying provider, with keys renamed and each resource wrapped by `WrapSchemaResource`. |
+| `DataSourceMap` | `map[string]*schema.Resource` | All data sources from the underlying provider, with keys renamed and each resource wrapped by `WrapSchemaResource`. |
+
+---
+
+## `UpdateSchemaWithDefaults`
+
+```go
+func UpdateSchemaWithDefaults(smap map[string]*schema.Schema) map[string]*schema.Schema
+```
+
+`UpdateSchemaWithDefaults` mutates the provided schema map in-place to add the fields required for IAP tunnel operation and to tighten the requirements on `project` and `zone`.
+
+<ParamField path="smap" type="map[string]*schema.Schema" required>
+  The schema map to update. Must already contain `project` and `zone` entries (inherited from the Google provider schema) or the function will panic with a nil-pointer dereference.
+</ParamField>
+
+**Returns** the same map after mutation.
+
+**Fields added or modified:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `project` | `string` | `true` | — | Set `Required=true`, `Optional=false`. Inherited from the Google provider. |
+| `zone` | `string` | `true` | — | Set `Required=true`, `Optional=false`. Inherited from the Google provider. |
+| `instance` | `string` | `true` | — | The name of the GCE instance on which to start the proxy. |
+| `interface` | `string` | `false` | `"nic0"` | The network interface on the instance to connect through. |
+| `remote_port` | `int` | `false` | `8888` | The port of the proxy running on the bastion host (the default tinyproxy port). |
+
+---
+
+## `StartTunnel`
+
+```go
+func StartTunnel(ctx context.Context, d *schema.ResourceData, config *google.Config) (proxyURL string, err error)
+```
+
+`StartTunnel` reads tunnel parameters from `ResourceData`, allocates a free local port, starts an IAP tunnel proxy in a background goroutine, and returns the local proxy URL.
+
+<ParamField path="ctx" type="context.Context" required>
+  Context used for the lifetime of the tunnel. Cancelling the context stops the background `StartProxy` goroutine.
+</ParamField>
+
+<ParamField path="d" type="*schema.ResourceData" required>
+  The resource data from which `project`, `zone`, `instance`, `interface`, and `remote_port` are read. All five fields must be present and castable to their expected types (`string` for the first four, `int` for `remote_port`).
+</ParamField>
+
+<ParamField path="config" type="*google.Config" required>
+  The Google provider configuration. The token source from `config.GetTokenSource()` is set on the `tunnel.TunnelManager` before the proxy is started.
+</ParamField>
+
+**Returns** `proxyURL` as `http://localhost:<port>` (where `<port>` is a free port selected by `freeport.GetFreePort`) and a non-nil `err` if any step fails.
+
+**Behavior:**
+
+1. Reads `project`, `zone`, `instance`, `interface`, and `remote_port` from `d`. Returns an error immediately if any type assertion fails.
+2. Calls `freeport.GetFreePort()` to select an available local port.
+3. Constructs a `tunnel.TunnelManager` with the five parameters and the token source from `config`.
+4. Launches `tm.StartProxy(ctx)` in a background goroutine that forwards any error onto an unbuffered channel.
+5. Waits **1 second**. If the goroutine sends an error within that window, `StartTunnel` returns the error. Otherwise it proceeds.
+6. Constructs `proxyURL = fmt.Sprintf("http://localhost:%d", localPort)`.
+7. Makes a connectivity test by issuing an HTTP GET to `https://www.google.com/` through the proxy using a custom `http.Transport`. A failure is logged but does **not** cause `StartTunnel` to return an error.
+8. Returns `proxyURL, nil`.
+
+<Note>
+  `StartTunnel` waits exactly **1 second** for a startup error before returning. The `iap_tunnel_proxy` resource description refers to a 5-second wait — that figure applies to the standalone tunnel implementation, not to this function. Errors that occur after the 1-second window are logged at `[ERROR]` level but do not surface to the caller.
+</Note>
+
+---
+
+## `WrapSchemaResource`
+
+```go
+func WrapSchemaResource(resource *schema.Resource) *schema.Resource
+```
+
+`WrapSchemaResource` returns a new `*schema.Resource` that copies all structural fields from `resource` and re-implements every non-nil CRUD handler to extract the underlying provider from the `meta` argument before forwarding the call.
+
+<ParamField path="resource" type="*schema.Resource" required>
+  The original resource whose CRUD operations will be wrapped. Only non-nil operation fields are wrapped; nil fields are left as nil on the returned resource.
+</ParamField>
+
+**Returns** a new `*schema.Resource`. The following fields are copied directly (not wrapped): `Schema`, `SchemaVersion`, `MigrateState`, `StateUpgraders`, `Importer`, `Description`, `UseJSONNumber`.
+
+**Wrapped operations:**
+
+Each wrapped handler asserts that `meta` implements `WrappedProvider`. On success it calls the original handler with `underlyingProvider.UnderlyingProvider()` as the `meta` argument. On failure it returns an error or a `diag.Diagnostics` with `Severity: Error`.
+
+| Operation | Signature style |
+|---|---|
+| `Create` | `func(*schema.ResourceData, interface{}) error` |
+| `CreateContext` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `CreateWithoutTimeout` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `Read` | `func(*schema.ResourceData, interface{}) error` |
+| `ReadContext` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `ReadWithoutTimeout` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `Update` | `func(*schema.ResourceData, interface{}) error` |
+| `UpdateContext` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `UpdateWithoutTimeout` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `Delete` | `func(*schema.ResourceData, interface{}) error` |
+| `DeleteContext` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `DeleteWithoutTimeout` | `func(context.Context, *schema.ResourceData, interface{}) diag.Diagnostics` |
+| `Exists` | `func(*schema.ResourceData, interface{}) (bool, error)` |
+| `CustomizeDiff` | `func(context.Context, *schema.ResourceDiff, interface{}) error` |
+
+---
+
+## `WrappedProvider`
+
+```go
+type WrappedProvider interface {
+    UnderlyingProvider() interface{}
+    GoogleProvider() interface{}
+}
+```
+
+`WrappedProvider` is the interface that the `meta` argument passed to every CRUD handler must satisfy when resources are wrapped by `WrapSchemaResource`. Each Synapse provider's `ConfigureContextFunc` returns a struct that implements this interface.
+
+| Method | Returns | Description |
+|---|---|---|
+| `UnderlyingProvider()` | `interface{}` | The configured underlying provider (Kubernetes, Helm, etc.) passed to the original resource's CRUD operation. |
+| `GoogleProvider()` | `interface{}` | The configured Google provider, available for operations that need Google API access alongside the underlying provider. |
+
+---
+
+## `MustCombineMaps`
+
+```go
+func MustCombineMaps[T interface{}](m1, m2 map[string]T) map[string]T
+```
+
+`MustCombineMaps` merges `m2` into `m1` and returns `m1`. It is a generic function that accepts any map with `string` keys.
+
+<ParamField path="m1" type="map[string]T" required>
+  The destination map. All entries from `m2` are written into this map. Mutated in-place.
+</ParamField>
+
+<ParamField path="m2" type="map[string]T" required>
+  The source map whose entries are copied into `m1`.
+</ParamField>
+
+**Returns** `m1` after all entries from `m2` have been added.
+
+<Warning>
+  `MustCombineMaps` panics with the message `"Key overlap found when combining maps"` if any key in `m2` already exists in `m1`. This is intentional: schema key conflicts between the Google provider and an underlying provider are a configuration error, not a recoverable condition. The panic surfaces the conflict immediately at provider startup rather than silently overwriting fields.
+</Warning>

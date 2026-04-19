@@ -1,0 +1,109 @@
+---
+title: "Authenticate with GCP for Synapse IAP Terraform providers"
+description: "Configure GCP credentials for the Synapse IAP Terraform providers using service account keys, impersonation, or Application Default Credentials."
+---
+
+All three Synapse IAP providers — `terraform-provider-iap`, `terraform-provider-helmproxy`, and `terraform-provider-kubeproxy` — embed the full Google Terraform provider schema via `CombineSchemas`. This means every authentication method supported by the upstream `google` provider is available without any additional configuration.
+
+## Authentication methods
+
+<Tabs>
+  <Tab title="Service account key file">
+    Pass a JSON key file path or the raw JSON string to the `credentials` field on the `google` provider block.
+
+    ```hcl provider.tf
+    provider "google" {
+      credentials = file("path/to/service-account-key.json")
+      project     = var.project
+    }
+    ```
+
+    The same `credentials` field is available directly on the `helmproxy` and `kubeproxy` provider blocks because the Google schema is merged into them at initialization.
+
+    ```hcl provider.tf
+    provider "helmproxy" {
+      credentials = file("path/to/service-account-key.json")
+      project     = var.project
+      zone        = var.zone
+      instance    = var.instance
+    }
+    ```
+
+    <Warning>
+      Never commit service account key files or their contents to version control. Use a secrets manager, a CI/CD secret store, or the `GOOGLE_CREDENTIALS` environment variable instead.
+    </Warning>
+  </Tab>
+
+  <Tab title="Service account impersonation">
+    Use the `impersonate_service_account` field to have Terraform act as a different service account. The caller identity must have the `roles/iam.serviceAccountTokenCreator` role on the target account.
+
+    In the examples, this is done by first obtaining a short-lived access token with `google_service_account_access_token`, then passing `var.service_account` to the target:
+
+    ```hcl google.tf
+    provider "google" {
+    }
+
+    data "google_service_account_access_token" "kube_sa" {
+      target_service_account = var.service_account
+      lifetime               = "1000s"
+      scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email"
+      ]
+    }
+    ```
+
+    ```hcl variables.tf
+    variable "service_account" {
+      type        = string
+      description = "The service account to impersonate"
+    }
+    ```
+
+    Alternatively, configure impersonation directly on any provider block:
+
+    ```hcl provider.tf
+    provider "kubeproxy" {
+      impersonate_service_account = var.service_account
+      project                     = var.project
+      zone                        = var.zone
+      instance                    = var.instance
+    }
+    ```
+  </Tab>
+
+  <Tab title="Application Default Credentials">
+    When no explicit credential fields are set, the Google provider falls back to Application Default Credentials (ADC). Run the following command to configure ADC with your user identity:
+
+    ```bash
+    gcloud auth application-default login
+    ```
+
+    With ADC in place, the provider block requires no credential configuration:
+
+    ```hcl provider.tf
+    provider "google" {
+    }
+    ```
+
+    The `helmproxy` and `kubeproxy` providers behave identically — omitting `credentials` and `impersonate_service_account` causes them to pick up ADC automatically.
+
+    ```hcl provider.tf
+    provider "helmproxy" {
+      project  = var.project
+      zone     = var.zone
+      instance = var.instance
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Required IAM permissions
+
+The identity used by Terraform must have the following role granted on the bastion GCE instance:
+
+| Role | Resource |
+|------|----------|
+| `roles/iap.tunnelResourceAccessor` | The bastion host GCE instance |
+
+Without this role, the IAP tunnel cannot be established and the provider will fail during `terraform apply`.

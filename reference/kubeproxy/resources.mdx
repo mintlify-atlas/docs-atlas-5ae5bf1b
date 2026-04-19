@@ -1,0 +1,61 @@
+---
+title: "kubeproxy resources and data sources schema reference"
+description: "Reference for kubeproxy_secret, kubeproxy_config_map, and other kubeproxy resources. Arguments match the upstream Kubernetes provider with an IAP tunnel."
+---
+
+All `kubernetes_` resources and data sources from the upstream Kubernetes Terraform provider are available as `kubeproxy_` equivalents. Arguments, attributes, and nested blocks are identical to the upstream provider — only the resource name prefix changes.
+
+## `kubeproxy_secret`
+
+The following example creates a Kubernetes secret of type `kubernetes.io/basic-auth`, taken directly from `kubeproxy/examples/main.tf`.
+
+```hcl main.tf
+resource "kubeproxy_secret" "example" {
+  metadata {
+    name = "basic-auth"
+  }
+
+  data = {
+    username = "admin"
+    password = "P4ssw0rd"
+  }
+
+  type = "kubernetes.io/basic-auth"
+}
+```
+
+## `data.kubeproxy_resource`
+
+The `kubeproxy_resource` data source reads any Kubernetes object by API version, kind, and metadata. The example below reads a ConfigMap and outputs a key from its `data` map.
+
+```hcl main.tf
+data "kubeproxy_resource" "example" {
+  api_version = "v1"
+  kind        = "ConfigMap"
+
+  metadata {
+    name      = "example"
+    namespace = "default"
+  }
+}
+
+output "test" {
+  value = data.kubeproxy_resource.example.object.data.TEST
+}
+```
+
+## Naming convention
+
+`CombineSchemas` in `tfcore/utils/combine_schemas.go` replaces the string `"kubernetes"` with `"kubeproxy"` in every resource and data source key registered by the upstream provider. No other transformation is applied, so the schema for each resource is identical to its upstream counterpart.
+
+<Warning>
+  The `kubeproxy` provider does **not** support `kubernetes_manifest` resources. The manifest resource relies on a separate tfprotov5 provider binary (`ManifestProvider`) and is excluded from the combined schema. Use the `kubectl` provider for manifest-style resources instead.
+</Warning>
+
+<Note>
+  All resource arguments match the upstream Kubernetes provider exactly. Only the prefix in the resource address changes from `kubernetes_` to `kubeproxy_`.
+</Note>
+
+## Full argument reference
+
+For the complete list of resources, data sources, arguments, and computed attributes, see the official [Kubernetes Terraform provider documentation](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs). Every resource and data source listed there is available under the `kubeproxy_` prefix.

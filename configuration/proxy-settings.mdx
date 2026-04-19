@@ -1,0 +1,109 @@
+---
+title: "IAP proxy field reference: instance, zone, and port"
+description: "Configure the IAP tunnel proxy parameters — project, zone, instance, interface, and remote_port — for all three Synapse Terraform providers."
+---
+
+Each of the three Synapse providers (`terraform-provider-iap`, `terraform-provider-helmproxy`, and `terraform-provider-kubeproxy`) requires the same set of proxy configuration fields to locate the bastion host and open the IAP tunnel. These fields are added to the combined provider schema by `UpdateSchemaWithDefaults` at initialization time.
+
+## Field reference
+
+<ParamField path="project" type="string" required>
+  GCP project ID of the bastion host. This field is promoted from optional to required by `UpdateSchemaWithDefaults`.
+</ParamField>
+
+<ParamField path="zone" type="string" required>
+  GCP zone of the bastion instance, for example `us-central1-a`. This field is also promoted from optional to required.
+</ParamField>
+
+<ParamField path="instance" type="string" required>
+  Name of the GCE instance acting as the bastion host.
+</ParamField>
+
+<ParamField path="interface" type="string" default="nic0">
+  Network interface on the bastion instance through which the tunnel is opened.
+</ParamField>
+
+<ParamField path="remote_port" type="integer" default="8888">
+  Port of the proxy process running on the bastion. Defaults to `8888`, which is the default port for tinyproxy. Must be between 1 and 65535.
+</ParamField>
+
+## Provider block examples
+
+The fields appear identically across all three providers. The examples below are drawn directly from the project's `variables.tf` and provider configuration files.
+
+<CodeGroup>
+
+```hcl iap
+provider "iap" {
+  project     = var.project
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  remote_port = var.remote_port
+}
+```
+
+```hcl helmproxy
+provider "helmproxy" {
+  project     = var.project
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  remote_port = var.remote_port
+}
+```
+
+```hcl kubeproxy
+provider "kubeproxy" {
+  project     = var.project
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  remote_port = var.remote_port
+}
+```
+
+</CodeGroup>
+
+<Note>
+  The provider selects a free local port automatically using `freeport.GetFreePort()`. The resulting proxy URL is exposed as `http://localhost:<PORT>` — you do not need to choose or reserve a local port yourself.
+</Note>
+
+## Using Terraform variables
+
+All proxy fields are well-suited to Terraform input variables. The following pattern is used across all three provider example directories:
+
+```hcl variables.tf
+variable "project" {
+  type        = string
+  description = "The project of the bastion proxy"
+}
+
+variable "zone" {
+  type        = string
+  description = "The zone of the bastion proxy"
+}
+
+variable "instance" {
+  type        = string
+  description = "The instance to use for the bastion proxy"
+  default     = "rpc-bastion"
+}
+
+variable "interface" {
+  type        = string
+  description = "The interface to use for the bastion proxy"
+  default     = "nic0"
+}
+
+variable "remote_port" {
+  type        = string
+  description = "The remote_port of the bastion proxy"
+  # tinyproxy default
+  default = 8888
+}
+```
+
+<Tip>
+  Define `instance`, `interface`, and `remote_port` with their defaults in `variables.tf` so callers only need to supply `project` and `zone`. This matches the pattern used in the helmproxy and kubeproxy example configurations.
+</Tip>

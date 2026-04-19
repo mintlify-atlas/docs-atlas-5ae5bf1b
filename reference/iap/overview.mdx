@@ -1,0 +1,59 @@
+---
+title: "IAP provider: complete Terraform reference overview"
+description: "Reference index for the Synapse iap Terraform provider, including the iap_tunnel_proxy resource and iap_tunnel_keep_alive data source schemas."
+---
+
+The `iap` provider opens Identity-Aware Proxy tunnels to GCP bastion instances and exposes a local HTTP proxy URL that other Terraform providers (such as `kubernetes` or `helm`) can route traffic through. It inherits the full Google provider schema for authentication and project configuration, so any credential mechanism supported by the Google provider works here as well.
+
+## Provider schema
+
+The `iap` provider delegates authentication and project configuration entirely to the underlying Google provider. The key fields are listed below; refer to the [Google provider documentation](https://registry.terraform.io/providers/hashicorp/google/latest/docs/guides/provider_reference) for the complete schema.
+
+| Field | Type | Description |
+|---|---|---|
+| `credentials` | string | Path to a service account key file or inline JSON credentials. |
+| `project` | string | Default GCP project ID used when a resource does not specify one. |
+| `zone` | string | Default GCP zone used when a resource does not specify one. |
+| `impersonate_service_account` | string | Service account to impersonate for all API calls. |
+| `access_token` | string | OAuth 2.0 access token to use instead of a credentials file. |
+| `scopes` | list(string) | OAuth 2.0 scopes to request when obtaining credentials. |
+
+```hcl provider.tf
+terraform {
+  required_providers {
+    iap = {
+      version = "~> 1.0.0"
+      source  = "example-iap.com/provider/iap"
+    }
+  }
+}
+
+provider "iap" {
+}
+```
+
+## Resources
+
+| Resource | Type | Description |
+|---|---|---|
+| `iap_tunnel_proxy` | Resource | Starts an IAP tunnel to a bastion GCE instance and outputs a local `proxy_url`. |
+| `iap_tunnel_keep_alive` | Data source | Holds an IAP tunnel open for a configurable duration during long `terraform apply` operations. |
+
+## Reference pages
+
+<CardGroup cols={2}>
+  <Card
+    title="iap_tunnel_proxy"
+    icon="circle-dot"
+    href="/reference/iap/resource-iap-tunnel-proxy"
+  >
+    Schema reference for the `iap_tunnel_proxy` resource: arguments, computed attributes, and lifecycle behavior.
+  </Card>
+  <Card
+    title="iap_tunnel_keep_alive"
+    icon="database"
+    href="/reference/iap/datasource-iap-tunnel-keep-alive"
+  >
+    Schema reference for the `iap_tunnel_keep_alive` data source: arguments, computed attributes, and keep-alive behavior.
+  </Card>
+</CardGroup>

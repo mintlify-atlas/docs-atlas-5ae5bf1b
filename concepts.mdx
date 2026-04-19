@@ -1,0 +1,95 @@
+---
+title: "IAP tunnel proxy: how it works inside a Terraform provider"
+description: "Learn how Synapse Terraform Providers embed GCP IAP tunnel lifecycle management inside the Terraform provider configuration phase."
+---
+
+Synapse Terraform Providers manage the full lifecycle of a GCP Identity-Aware Proxy tunnel — opening it during provider configuration and closing it when the apply completes. This page explains why that design is necessary, how the tunnel is wired together internally, and when to reach for each of the three providers.
+
+## The IAP tunneling problem
+
+When you deploy Kubernetes or Helm resources to a private GCP cluster, your Terraform process needs a route to the cluster API server. A common approach is to open an IAP tunnel with `gcloud compute start-iap-tunnel` before running Terraform, then point the provider at `localhost:<port>`. That works for interactive sessions, but it breaks down in automation:
+
+- The tunnel is a separate process with its own lifetime. If it exits before Terraform finishes, the apply fails midway.
+- In CI environments, coordinating two processes (the tunnel and Terraform) reliably requires error-prone wrapper scripts.
+- Terraform state tracks resources, not pre-conditions like running tunnels. A tunnel started outside Terraform can be accidentally left running or silently absent.
+
+Embedding the tunnel inside the provider lifecycle removes the coordination problem entirely: the tunnel exists if and only if Terraform is actively applying.
+
+## Provider lifecycle
+
+Every Terraform provider has a `ConfigureContextFunc` that runs once, before any resources are created or read. Synapse providers use this hook to start the IAP tunnel.
+
+When `terraform apply` runs, the following sequence occurs:
+
+1. Terraform calls `ConfigureContextFunc` on the provider.
+2. The provider authenticates with GCP using the ambient service account credentials.
+3. `StartTunnel` picks a random free local port using `freeport.GetFreePort()`, then starts the IAP tunnel in a goroutine via `tunnel.TunnelManager.StartProxy`.
+4. The provider waits up to 5 seconds for the goroutine to report an error. If no error arrives in that window, the provider assumes the tunnel is healthy and returns the configured provider interface to Terraform.
+5. Terraform proceeds to create, update, or destroy resources. All API calls to the cluster travel through `http://localhost:<port>`.
+6. When the apply finishes (or the provider is released), Go's garbage collection and context cancellation shut down the tunnel goroutine.
+
+<Note>
+  The 5-second startup window is a best-effort health check, not a guarantee. The provider also performs a live connectivity test by sending an HTTP request through the proxy to `https://www.google.com/` immediately after the tunnel starts. If that request fails, a warning is logged but the apply is not stopped, because the cluster endpoint may not permit outbound internet traffic through the proxy.
+</Note>
+
+## Proxy architecture
+
+The tunnel is not a direct TCP connection to the Kubernetes API server. It follows a two-hop proxy chain:
+
+```
+Terraform process
+    │
+    │  HTTP CONNECT (http://localhost:<localPort>)
+    ▼
+tinyproxy on bastion host  ←──  GCP IAP tunnel (WebSocket over HTTPS)
+    │
+    │  plain TCP
+    ▼
+Remote service (Kubernetes API, Helm backend, etc.)
+```
+
+- **Local port**: A random free port on the machine running Terraform. The provider writes this as `http://localhost:<port>` into the `proxy_url` attribute or the `KUBE_PROXY_URL` environment variable.
+- **IAP tunnel**: A WebSocket connection authenticated with the service account token, managed by `tunnel.TunnelManager`. GCP IAP enforces IAM access controls on this connection.
+- **tinyproxy**: A lightweight HTTP proxy running on the bastion host. It forwards requests from the tunnel to the actual remote service. The default port is `8888`, configurable via `remote_port`.
+- **Remote service**: Any service reachable from the bastion host's network — a private Kubernetes API server, a Helm backend, or any HTTP endpoint.
+
+The bastion host never needs a public IP address. IAP handles authentication and authorization at the GCP layer.
+
+## Three provider options
+
+Choose a provider based on what you want to deploy and whether you prefer the tunnel to be an explicit resource or embedded in the provider block.
+
+<CardGroup cols={3}>
+  <Card title="terraform-provider-iap" icon="shield">
+    Exposes the tunnel as a Terraform resource (`iap_tunnel_proxy`). The `proxy_url` output can be passed to any provider that accepts a proxy URL argument — not limited to Kubernetes or Helm. Also includes the `iap_tunnel_keep_alive` data source to hold the tunnel open for a fixed number of seconds.
+  </Card>
+  <Card title="terraform-provider-helmproxy" icon="layer-group">
+    Bundles the IAP tunnel directly into the Helm provider. The tunnel starts in `ConfigureContextFunc` alongside the Helm and Google provider initialization. All upstream `helm_*` resources are available as `helmproxy_*` resources with identical schemas, with no separate proxy resource needed.
+  </Card>
+  <Card title="terraform-provider-kubeproxy" icon="server">
+    Bundles the IAP tunnel directly into the Kubernetes provider. Works the same way as `helmproxy`: the tunnel starts during provider configuration, and all `kubernetes_*` resources are available as `kubeproxy_*` resources. The proxy URL is injected into the Kubernetes provider config before the underlying provider is initialized.
+  </Card>
+</CardGroup>
+
+| | `iap` | `helmproxy` | `kubeproxy` |
+|---|---|---|---|
+| Tunnel declared as | `iap_tunnel_proxy` resource | Provider block argument | Provider block argument |
+| Compatible with | Any provider accepting `proxy_url` | Helm releases | Kubernetes resources |
+| Keep-alive support | `iap_tunnel_keep_alive` data source | No | No |
+| Upstream resource prefix | N/A | `helmproxy_` | `kubeproxy_` |
+
+## Schema utilities
+
+The `helmproxy` and `kubeproxy` providers are built with two functions from `tfcore/utils`:
+
+- **`CombineSchemas`**: Merges the Google provider schema and the upstream provider schema (Helm or Kubernetes) into a single flat `CombinedSchema`. This lets you configure Google authentication and the upstream provider in a single `provider` block. The function also applies `UpdateSchemaWithDefaults`, which adds the `instance`, `interface`, `remote_port`, and tunnel-related fields and marks `project` and `zone` as required.
+
+- **`WrapSchemaResource`**: Renames every resource and data source from the upstream provider by replacing the upstream prefix (e.g., `helm`) with the proxy provider prefix (e.g., `helmproxy`). This means every `helm_release` becomes a `helmproxy_release` with an identical schema — no changes to your resource arguments are needed.
+
+Both functions are used the same way in `helmproxy` and `kubeproxy`:
+
+```go
+combinedSchema := utils.CombineSchemas(google.Provider(), helm.Provider(), "helm", "helmproxy")
+```
+
+The first two arguments are the Google and upstream providers. The third and fourth arguments are the string to replace and its replacement in resource names.

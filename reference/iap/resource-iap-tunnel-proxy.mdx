@@ -1,0 +1,80 @@
+---
+title: "iap_tunnel_proxy: Terraform resource schema reference"
+description: "Schema reference for the iap_tunnel_proxy Terraform resource: required arguments, computed attributes, and a complete HCL usage example."
+---
+
+The `iap_tunnel_proxy` resource starts an IAP tunnel to a named GCE bastion instance and surfaces a local HTTP proxy URL via the `proxy_url` attribute. Other Terraform providers that accept a `proxy_url` — such as `kubernetes` or `helm` — can reference this attribute to route their API calls through the tunnel without any out-of-band setup.
+
+## Example usage
+
+```hcl main.tf
+terraform {
+  required_providers {
+    iap = {
+      version = "~> 1.0.0"
+      source  = "example-iap.com/provider/iap"
+    }
+  }
+}
+
+provider "iap" {
+}
+
+provider "kubernetes" {
+  host      = ""
+  token     = data.google_service_account_access_token.kube_sa.access_token
+  proxy_url = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+}
+
+resource "iap_tunnel_proxy" "tunnel_proxy" {
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+}
+
+output "tunnel_proxy" {
+  value = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+}
+```
+
+## Arguments
+
+All arguments are required and trigger resource replacement (`ForceNew`) when changed.
+
+<ParamField path="project" type="string" required>
+  The GCP project ID that contains the bastion GCE instance. Changing this value destroys and recreates the resource.
+</ParamField>
+
+<ParamField path="zone" type="string" required>
+  The GCP zone in which the bastion instance resides (for example, `us-central1-a`). Changing this value destroys and recreates the resource.
+</ParamField>
+
+<ParamField path="instance" type="string" required>
+  The name of the bastion GCE instance to tunnel into. Changing this value destroys and recreates the resource.
+</ParamField>
+
+<ParamField path="interface" type="string" required>
+  The network interface on the bastion instance to connect through. This is typically `nic0` for instances with a single network interface. Changing this value destroys and recreates the resource.
+</ParamField>
+
+<ParamField path="remote_port" type="number" required>
+  The port of the proxy running on the bastion host. Must be an integer between `1` and `65535` (inclusive). Changing this value destroys and recreates the resource.
+</ParamField>
+
+## Attributes
+
+<ResponseField name="proxy_url" type="string">
+  The local proxy URL in the form `http://localhost:<port>`, where `<port>` is a free port selected automatically on the machine running Terraform. Pass this value to the `proxy_url` argument of downstream providers.
+</ResponseField>
+
+## Lifecycle notes
+
+- **ForceNew on all arguments** — any change to `project`, `zone`, `instance`, `interface`, or `remote_port` destroys the existing tunnel and creates a new one.
+- **Create** — the provider starts the IAP tunnel in a background goroutine, then waits up to 5 seconds for a startup error before returning. If no error is received within that window, the resource is considered healthy and `proxy_url` is set.
+- **Delete** — the provider clears the resource ID and all field values. The underlying tunnel process is not explicitly terminated; it closes when the Terraform process exits.
+
+<Note>
+  After starting the tunnel, the provider waits up to 5 seconds before returning. If the tunnel process sends an error during that window, the provider surfaces the error and the `create` operation fails. Errors that occur after the 5-second window are logged at `[ERROR]` level but do not fail the apply.
+</Note>

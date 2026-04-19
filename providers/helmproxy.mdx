@@ -1,0 +1,84 @@
+---
+title: 'Helm Proxy Provider: deploy charts through IAP tunnel'
+description: 'The helmproxy provider wraps the Helm provider with an embedded IAP tunnel, letting you deploy Helm charts to GCP clusters without exposing the API server.'
+---
+
+The `helmproxy` provider combines the Google and Helm providers into a single block. When you run `terraform apply`, it starts an IAP tunnel to your bastion host and sets the resulting proxy URL before Helm connects to the cluster, so your chart deployments never require the Kubernetes API server to be publicly accessible.
+
+## How it works
+
+`helmproxy` uses `CombineSchemas` to merge the Google provider schema with the Helm provider schema. Every Helm resource is re-registered under the `helmproxy_` prefix instead of `helm_`, and every Helm data source follows the same convention. You configure IAP tunnel fields alongside the Helm `kubernetes {}` block in a single provider block.
+
+At configure time the provider:
+
+1. Authenticates with Google using the merged schema fields.
+2. Calls `utils.StartTunnel` to open an IAP tunnel and obtain a local proxy URL.
+3. Sets the `KUBE_PROXY_URL` environment variable to that URL so the Helm client routes all API traffic through the tunnel.
+
+## Provider configuration
+
+All IAP tunnel fields (`project`, `zone`, `instance`, `interface`, `remote_port`) are required at the provider level. Helm cluster credentials go inside a nested `kubernetes {}` block.
+
+```hcl terraform.tf
+terraform {
+  required_providers {
+    helmproxy = {
+      version = "~> 1.0.0"
+      source  = "example-helm.com/provider/helmproxy"
+    }
+  }
+}
+```
+
+```hcl main.tf
+provider "helmproxy" {
+  instance    = var.instance
+  zone        = var.zone
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+
+  kubernetes {
+    host           = ""
+    token          = data.google_service_account_access_token.kube_sa.access_token
+    config_path    = var.config_path
+    config_context = var.config_context
+  }
+}
+```
+
+### Provider fields
+
+| Field | Type | Description |
+|---|---|---|
+| `project` | string | GCP project that owns the bastion instance. |
+| `zone` | string | Zone where the bastion instance runs (e.g. `us-central1-a`). |
+| `instance` | string | Name of the bastion Compute Engine instance. |
+| `interface` | string | Network interface on the bastion (e.g. `nic0`). |
+| `remote_port` | number | Port on the bastion to forward through (default `8888`, the tinyproxy default). |
+
+The `kubernetes {}` block accepts the same fields as the upstream Helm provider's `kubernetes {}` block.
+
+## Deploying a chart
+
+Use `helmproxy_release` exactly as you would `helm_release`. All arguments, nested blocks, and lifecycle behaviors are identical.
+
+```hcl main.tf
+resource "helmproxy_release" "omnirpc_example" {
+  name  = "omnirpc-example"
+  chart = "../../../charts/omnirpc/"
+}
+```
+
+<Tip>
+`helmproxy_release` accepts every argument that `helm_release` does. You can copy an existing `helm_release` block and change the resource type to `helmproxy_release` without modifying any other fields.
+</Tip>
+
+## Limitations
+
+- **tinyproxy required on the bastion.** The IAP tunnel forwards HTTP CONNECT traffic to the bastion's `remote_port`. A tinyproxy instance must be running on that port to proxy HTTPS traffic to the Kubernetes API server.
+- **Tunnel is ephemeral.** The proxy runs only for the duration of `terraform apply`. Long-running Helm operations that outlast the apply will lose connectivity.
+
+<Warning>
+`KUBE_PROXY_URL` is set as a process environment variable. If multiple helmproxy providers are configured in the same workspace, the last one to initialize will overwrite the variable for all of them.
+</Warning>

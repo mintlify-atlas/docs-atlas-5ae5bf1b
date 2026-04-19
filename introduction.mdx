@@ -1,0 +1,59 @@
+---
+title: "Synapse Terraform Providers: Secure GCP Access via IAP"
+description: "Three Terraform providers that route Helm and Kubernetes operations through GCP Identity-Aware Proxy tunnels, eliminating public infrastructure exposure."
+---
+
+Synapse Terraform Providers are a suite of three custom Terraform providers that let you deploy and manage GCP resources through [Identity-Aware Proxy (IAP)](https://cloud.google.com/iap) tunnels. Because Terraform resources are ephemeral, spinning up a long-lived IAP tunnel outside of Terraform and sharing it is not practical — these providers solve that by starting the IAP tunnel as part of the provider lifecycle, automatically tearing it down when the apply completes.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get your first IAP-tunneled Terraform deployment running in minutes
+  </Card>
+  <Card title="Core concepts" icon="lightbulb" href="/concepts">
+    Understand how IAP tunneling works within the Terraform provider lifecycle
+  </Card>
+  <Card title="IAP Provider" icon="shield-halved" href="/providers/iap">
+    Create standalone IAP tunnel proxies and keep-alive data sources
+  </Card>
+  <Card title="Helm Proxy Provider" icon="layer-group" href="/providers/helmproxy">
+    Deploy Helm charts through an IAP-authenticated proxy
+  </Card>
+  <Card title="Kube Proxy Provider" icon="server" href="/providers/kubeproxy">
+    Manage Kubernetes resources through an IAP-secured cluster endpoint
+  </Card>
+  <Card title="Reference" icon="book" href="/reference/iap/overview">
+    Full schema reference for all resources and data sources
+  </Card>
+</CardGroup>
+
+## Choose your provider
+
+<CardGroup cols={3}>
+  <Card title="terraform-provider-iap" icon="shield" href="/providers/iap">
+    Standalone IAP tunnel resource and keep-alive data source. Use when you need a reusable proxy URL for multiple downstream providers.
+  </Card>
+  <Card title="terraform-provider-helmproxy" icon="layer-group" href="/providers/helmproxy">
+    Wraps the Helm provider with an embedded IAP tunnel. All `helmproxy_*` resources work identically to `helm_*` resources.
+  </Card>
+  <Card title="terraform-provider-kubeproxy" icon="server" href="/providers/kubeproxy">
+    Wraps the Kubernetes provider with an embedded IAP tunnel. All `kubeproxy_*` resources work identically to `kubernetes_*` resources.
+  </Card>
+</CardGroup>
+
+## How it works
+
+<Steps>
+  <Step title="Provider configures the IAP tunnel">
+    When Terraform runs `apply`, the provider authenticates with GCP using your service account and starts an IAP tunnel to the specified bastion host instance. The tunnel listens on a random free local port.
+  </Step>
+  <Step title="Resources are created through the tunnel">
+    All Helm or Kubernetes API calls are routed through the local proxy endpoint (`http://localhost:<port>`). Resources behave identically to the upstream Helm or Kubernetes provider.
+  </Step>
+  <Step title="Tunnel is torn down on destroy">
+    When `terraform destroy` runs or the apply completes, the IAP tunnel is cleanly shut down. No long-running background processes are left behind.
+  </Step>
+</Steps>
+
+<Note>
+These providers require a GCP bastion host running a proxy (such as [tinyproxy](https://tinyproxy.github.io/)) that the IAP tunnel connects to. See the [bastion host setup guide](/guides/bastion-host-setup) for prerequisites.
+</Note>

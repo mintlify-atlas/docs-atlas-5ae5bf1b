@@ -1,0 +1,72 @@
+---
+title: "Provider schema: combining Google and upstream schemas"
+description: "Understand how Synapse providers merge the Google Terraform provider schema with Helm or Kubernetes schemas using CombineSchemas and WrapSchemaResource."
+---
+
+The Synapse IAP providers do not implement their own resource schemas from scratch. Instead, they compose an existing upstream provider (Helm or Kubernetes) with the Google provider schema, then patch the result to add the IAP tunnel fields. This composition is handled by two utilities in `tfcore/utils`: `CombineSchemas` and `WrapSchemaResource`.
+
+## CombineSchemas
+
+`CombineSchemas` takes the Google provider and an upstream provider, merges their schemas, renames the upstream resources, and injects the required IAP fields.
+
+```go tfcore/utils/combine_schemas.go
+func CombineSchemas(googleProvider, underlyingProvider *schema.Provider, toReplace, replaceWith string) (co CombinedSchema)
+```
+
+It performs three operations:
+
+1. **Schema merge** — calls `MustCombineMaps` to combine the Google provider's `Schema` and `ProviderMetaSchema` with the equivalent maps from the upstream provider. If any field name appears in both schemas, `MustCombineMaps` panics.
+
+2. **Resource renaming** — iterates over every key in the upstream provider's `ResourcesMap` and `DataSourcesMap`, replacing the first occurrence of `toReplace` with `replaceWith` in the key name. Each renamed resource is wrapped with `WrapSchemaResource` before being stored.
+
+3. **Default injection** — calls `UpdateSchemaWithDefaults` on the merged schema to promote `project` and `zone` from optional to required, and to add the `instance`, `interface`, and `remote_port` fields.
+
+The helmproxy and kubeproxy providers call `CombineSchemas` during initialization:
+
+```go terraform-provider-helmproxy/provider/provider.go
+combinedSchema := utils.CombineSchemas(google.Provider(), helm.Provider(), "helm", "helmproxy")
+```
+
+```go terraform-provider-kubeproxy/provider/main_provider.go
+combinedSchema := utils.CombineSchemas(google.Provider(), kubernetes.Provider(), "kubernetes", "kubeproxy")
+```
+
+<Warning>
+  `MustCombineMaps` panics at startup if the Google provider schema and the upstream provider schema share a field name. Ensure that any custom upstream provider fields do not overlap with Google provider fields before calling `CombineSchemas`.
+</Warning>
+
+## WrapSchemaResource
+
+`WrapSchemaResource` wraps every CRUD handler on an upstream `*schema.Resource` so that the `meta` argument passed to each handler is the underlying provider interface rather than the combined `WrappedProvider`.
+
+```go tfcore/utils/wrapper.go
+func WrapSchemaResource(resource *schema.Resource) *schema.Resource
+```
+
+At runtime, the combined provider's `ConfigureContextFunc` returns a `configuredProvider` struct that implements `WrappedProvider`:
+
+```go
+type WrappedProvider interface {
+    UnderlyingProvider() interface{}
+    GoogleProvider() interface{}
+}
+```
+
+When a resource operation is invoked, the wrapper extracts `UnderlyingProvider()` and passes it as the `meta` value to the original handler. This means the upstream Helm or Kubernetes provider receives the client interface it expects, while the Google provider client remains accessible for tunnel operations — all without modifying the upstream provider's source code.
+
+## Resulting resource names
+
+The renaming performed by `CombineSchemas` follows a straightforward prefix substitution. For example:
+
+| Upstream resource | Provider | Renamed resource |
+|---|---|---|
+| `helm_release` | helmproxy | `helmproxy_release` |
+| `kubernetes_secret` | kubeproxy | `kubeproxy_secret` |
+| `kubernetes_deployment` | kubeproxy | `kubeproxy_deployment` |
+| `kubernetes_config_map` | kubeproxy | `kubeproxy_config_map` |
+
+Only the first occurrence of the upstream prefix is replaced (`strings.Replace(..., 1)`), so resource names that contain the prefix elsewhere in the string are not affected.
+
+<Note>
+  `UpdateSchemaWithDefaults` changes `project` and `zone` to `Required: true, Optional: false`. These fields are already present in the Google provider schema as optional; the function mutates them in place on the merged schema map.
+</Note>

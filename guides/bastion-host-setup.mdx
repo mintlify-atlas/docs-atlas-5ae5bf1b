@@ -1,0 +1,150 @@
+---
+title: "Configure a GCP bastion host with tinyproxy for IAP access"
+description: "Configure a GCP Compute Engine instance as an IAP-accessible bastion host running tinyproxy, required for all Synapse Terraform providers."
+---
+
+All three Synapse Terraform providers — `iap`, `helmproxy`, and `kubeproxy` — route traffic to private GCP resources through an IAP tunnel that terminates on a bastion host. The bastion host runs an HTTP proxy daemon (tinyproxy) that forwards requests from the tunnel to the target cluster or service. This page walks through creating and configuring that bastion host.
+
+## Architecture overview
+
+```
+Terraform provider → IAP tunnel (gcloud) → bastion host (tinyproxy) → private GCP resource
+```
+
+The Terraform provider authenticates with GCP using your service account, opens an IAP TCP-forwarding tunnel to the bastion instance, and binds a random free local port. All Helm or Kubernetes API calls are then sent to that local port, which the tunnel forwards to tinyproxy on the bastion, which forwards them to the private GKE API server or other target.
+
+## GCP instance requirements
+
+The bastion host must meet the following requirements:
+
+- **Same VPC as the target cluster.** The instance must have private network access to the Kubernetes API server or other resource you are proxying.
+- **No public IP required.** IAP TCP forwarding works with instances that have no external IP address.
+- **IAP firewall rule.** Allow ingress from the IAP CIDR range `35.235.240.0/20` on the port tinyproxy listens on (default `8888`). Without this rule, the IAP tunnel cannot reach tinyproxy.
+
+Create the firewall rule with `gcloud`:
+
+```bash
+gcloud compute firewall-rules create allow-iap-tinyproxy \
+  --network=YOUR_VPC_NETWORK \
+  --allow=tcp:8888 \
+  --source-ranges=35.235.240.0/20 \
+  --description="Allow IAP TCP forwarding to tinyproxy on bastion"
+```
+
+Replace `YOUR_VPC_NETWORK` with your VPC network name and `8888` with your chosen tinyproxy port if different.
+
+## Install tinyproxy on the bastion
+
+SSH into the bastion instance and install tinyproxy:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tinyproxy
+```
+
+Replace the default configuration with a minimal one that accepts connections only from localhost (the local end of the IAP tunnel):
+
+```bash
+sudo tee /etc/tinyproxy/tinyproxy.conf > /dev/null <<'EOF'
+Port 8888
+Listen 0.0.0.0
+Timeout 600
+Allow 127.0.0.1
+Allow ::1
+LogFile "/var/log/tinyproxy/tinyproxy.log"
+EOF
+```
+
+Enable and start the service:
+
+```bash
+sudo systemctl enable tinyproxy
+sudo systemctl restart tinyproxy
+sudo systemctl status tinyproxy
+```
+
+<Note>
+The default `remote_port` for all Synapse Terraform providers is `8888`, matching the tinyproxy default. If you change the `Port` value in `tinyproxy.conf`, set `remote_port` to the same value in your provider configuration.
+</Note>
+
+## Grant IAP tunnel access
+
+The identity running `terraform apply` (typically a service account) needs the `roles/iap.tunnelResourceAccessor` role on the bastion host instance or the project. Grant it with `gcloud`:
+
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:YOUR_SERVICE_ACCOUNT_EMAIL" \
+  --role="roles/iap.tunnelResourceAccessor"
+```
+
+To scope the binding to a single instance rather than the whole project:
+
+```bash
+gcloud compute instances add-iam-policy-binding YOUR_INSTANCE_NAME \
+  --zone=YOUR_ZONE \
+  --member="serviceAccount:YOUR_SERVICE_ACCOUNT_EMAIL" \
+  --role="roles/iap.tunnelResourceAccessor"
+```
+
+## Configure the provider to use the bastion
+
+Pass the bastion host details to whichever provider you are using. The following example uses the `iap` provider:
+
+```hcl main.tf
+resource "iap_tunnel_proxy" "tunnel_proxy" {
+  project     = var.project
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  remote_port = var.remote_port
+}
+```
+
+For the `helmproxy` or `kubeproxy` providers, set the same fields directly in the `provider` block:
+
+```hcl main.tf
+provider "kubeproxy" {
+  project     = var.project
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  remote_port = var.remote_port
+
+  # ... kubernetes credentials ...
+}
+```
+
+A matching variables file:
+
+```hcl variables.tf
+variable "project" {
+  type        = string
+  description = "The project of the bastion proxy"
+}
+
+variable "zone" {
+  type        = string
+  description = "The zone of the bastion proxy"
+}
+
+variable "instance" {
+  type        = string
+  description = "The instance to use for the bastion proxy"
+}
+
+variable "interface" {
+  type        = string
+  description = "The interface to use for the bastion proxy"
+  default     = "nic0"
+}
+
+variable "remote_port" {
+  type        = string
+  description = "The remote_port of the bastion proxy"
+  default     = 8888
+}
+```
+
+<Warning>
+The bastion host must have outbound network connectivity to the target service. If your VPC uses a private IP for the GKE API server, confirm that the bastion's subnet has a route to it and that no firewall rules block egress from the bastion to the API server's port (typically `443`).
+</Warning>

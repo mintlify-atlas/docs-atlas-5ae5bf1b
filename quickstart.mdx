@@ -1,80 +1,174 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Get started with the Synapse IAP Terraform Providers"
+description: "Configure a GCP IAP tunnel Terraform provider and deploy your first resource through a tinyproxy bastion host in under five minutes."
 ---
 
-## Get started in three steps
+This quickstart walks you through adding one of the Synapse Terraform Providers to an existing Terraform configuration. You will configure a provider block, declare an IAP tunnel resource, pass the resulting proxy URL to a downstream provider, and run `terraform apply` — all without setting up any long-lived tunnels outside of Terraform.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, make sure you have the following:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- A GCP project with [Identity-Aware Proxy](https://cloud.google.com/iap) enabled.
+- A GCP Compute Engine instance (bastion host) reachable via IAP, with [tinyproxy](https://tinyproxy.github.io/) running on port `8888`.
+- A GCP service account with the `roles/iap.tunnelResourceAccessor` IAM role on the bastion host.
+- Terraform `>= 0.13` installed locally, with [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) configured.
 
-### Step 2: Deploy your changes
+<Steps>
+  <Step title="Configure the provider block">
+    Declare the `iap` provider in your `required_providers` block and configure the Google authentication context. The IAP provider inherits credentials from the Google provider.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```hcl main.tf
+    terraform {
+      required_providers {
+        iap = {
+          version = "~> 1.0.0"
+          source  = "example-iap.com/provider/iap"
+        }
+      }
+    }
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    provider "iap" {
+    }
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    The provider block intentionally has no arguments — authentication is handled by the ambient Google credentials. Set `GOOGLE_APPLICATION_CREDENTIALS` or run `gcloud auth application-default login` before calling `terraform apply`.
+  </Step>
 
-### Step 3: Go live
+  <Step title="Create the tunnel proxy resource">
+    Add an `iap_tunnel_proxy` resource. It opens an IAP tunnel to your bastion host and forwards traffic through tinyproxy. Terraform assigns a random free local port at plan time.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```hcl main.tf
+    resource "iap_tunnel_proxy" "tunnel_proxy" {
+      project    = var.project
+      zone       = var.zone
+      instance   = var.instance
+      interface  = var.interface
+      remote_port = var.remote_port
+    }
+
+    output "tunnel_proxy" {
+      value = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+    }
+    ```
+
+    The computed `proxy_url` attribute is populated after the tunnel starts and contains a `http://localhost:<port>` address you can pass to any downstream resource.
+
+    <Note>
+      The default value for `remote_port` is `8888`, which is the tinyproxy default. You only need to set this variable if tinyproxy is listening on a different port on your bastion host.
+    </Note>
+
+    Declare the corresponding variables in `variables.tf`:
+
+    ```hcl variables.tf
+    variable "project" {
+      type        = string
+      description = "The project of the bastion proxy"
+    }
+
+    variable "zone" {
+      type        = string
+      description = "The zone of the bastion proxy"
+    }
+
+    variable "instance" {
+      type        = string
+      description = "The instance to use for the bastion proxy"
+    }
+
+    variable "interface" {
+      type        = string
+      description = "The interface to use for the bastion proxy"
+      default     = "nic0"
+    }
+
+    variable "remote_port" {
+      type        = string
+      description = "The remote_port of the bastion proxy"
+      default     = 8888
+    }
+    ```
+  </Step>
+
+  <Step title="Pass the proxy URL to a downstream provider">
+    Reference `resource.iap_tunnel_proxy.tunnel_proxy.proxy_url` in any provider that accepts a `proxy_url` argument. The example below routes Kubernetes API calls through the tunnel:
+
+    ```hcl main.tf
+    provider "kubernetes" {
+      host        = ""
+      token       = data.google_service_account_access_token.kube_sa.access_token
+      proxy_url   = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+      config_path    = var.config_path
+      config_context = var.config_context
+    }
+
+    # Verify the tunnel by fetching a storage class — this will error with a
+    # permission or not-found error, which confirms the proxy is working.
+    data "kubernetes_storage_class" "example" {
+      metadata {
+        name = "terraform-example"
+      }
+
+      depends_on = [resource.iap_tunnel_proxy.tunnel_proxy]
+    }
+    ```
+
+    <Warning>
+      The IAP tunnel is started and stopped within the provider lifecycle. It is active only for the duration of `terraform apply` or `terraform plan`. Do not share the `proxy_url` value with long-running processes or other Terraform workspaces — the port will not be available after the apply completes.
+    </Warning>
+
+    If you are deploying Helm charts instead of Kubernetes resources, use the `helmproxy` provider, which bundles the tunnel and Helm provider together:
+
+    ```hcl main.tf
+    provider "helmproxy" {
+      instance    = var.instance
+      zone        = var.zone
+      interface   = var.interface
+      project     = var.project
+      remote_port = var.remote_port
+
+      kubernetes {
+        host           = ""
+        token          = data.google_service_account_access_token.kube_sa.access_token
+        config_path    = var.config_path
+        config_context = var.config_context
+      }
+    }
+
+    resource "helmproxy_release" "omnirpc_example" {
+      name  = "omnirpc-example"
+      chart = "../../../charts/omnirpc/"
+    }
+    ```
+  </Step>
+
+  <Step title="Run terraform apply">
+    Initialize the workspace and apply:
+
+    ```bash
+    terraform init
+    terraform apply
+    ```
+
+    During the `apply`, the provider starts the IAP tunnel and waits up to 5 seconds for any startup errors before proceeding. If the tunnel fails to start within that window, the provider returns an error and the apply stops.
+
+    After the apply completes, the tunnel is torn down automatically. No background processes remain.
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core concepts" icon="lightbulb" href="/concepts">
+    Understand how the IAP tunnel lifecycle fits into the Terraform provider model.
+  </Card>
+  <Card title="IAP provider reference" icon="shield-halved" href="/providers/iap">
+    Full schema for `iap_tunnel_proxy` and `iap_tunnel_keep_alive`.
+  </Card>
+  <Card title="Helm proxy provider" icon="layer-group" href="/providers/helmproxy">
+    Deploy Helm charts through a bundled IAP tunnel.
+  </Card>
+  <Card title="Kube proxy provider" icon="dharmachakra" href="/providers/kubeproxy">
+    Manage Kubernetes resources through an IAP-secured cluster endpoint.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

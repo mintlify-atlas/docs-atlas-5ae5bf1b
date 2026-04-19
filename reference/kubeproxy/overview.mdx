@@ -1,0 +1,87 @@
+---
+title: "kubeproxy Terraform provider configuration reference"
+description: "Complete reference for the kubeproxy Terraform provider configuration block, including IAP tunnel fields and Kubernetes authentication arguments."
+---
+
+The `kubeproxy` provider combines the Google provider schema with the Kubernetes provider schema using `CombineSchemas`. Every `kubernetes_` resource and data source is available as a `kubeproxy_` equivalent, and all Kubernetes API calls are automatically routed through an IAP tunnel to a bastion host.
+
+## Provider arguments
+
+<ParamField path="project" type="string" required>
+  GCP project ID that contains the bastion instance. Overrides the `GOOGLE_PROJECT` environment variable.
+</ParamField>
+
+<ParamField path="zone" type="string" required>
+  GCP zone where the bastion instance is running (for example, `us-east1-b`).
+</ParamField>
+
+<ParamField path="instance" type="string" required>
+  Name of the GCE bastion instance used to open the IAP tunnel.
+</ParamField>
+
+<ParamField path="interface" type="string" default="nic0">
+  Network interface on the bastion to tunnel through.
+</ParamField>
+
+<ParamField path="remote_port" type="number" default="8888">
+  Port on the bastion where tinyproxy is listening. The default matches the tinyproxy default port.
+</ParamField>
+
+<ParamField path="host" type="string">
+  URL of the Kubernetes API server. Leave empty to rely on `config_path` and `config_context`.
+</ParamField>
+
+<ParamField path="token" type="string">
+  Bearer token used to authenticate against the Kubernetes API server.
+</ParamField>
+
+<ParamField path="config_path" type="string" default="~/.kube/config">
+  Path to the kubeconfig file on disk.
+</ParamField>
+
+<ParamField path="config_context" type="string">
+  Context to activate from the kubeconfig file.
+</ParamField>
+
+## Example configuration
+
+```hcl provider.tf
+terraform {
+  required_providers {
+    kubeproxy = {
+      version = "~> 1.0.0"
+      source  = "example-kube.com/provider/kubeproxy"
+    }
+  }
+}
+
+provider "kubeproxy" {
+  instance    = var.instance
+  zone        = var.zone
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+
+  host           = ""
+  token          = data.google_service_account_access_token.kube_sa.access_token
+  config_path    = var.config_path
+  config_context = var.config_context
+}
+```
+
+## Available resources
+
+All upstream `kubernetes_` resources and data sources are available under the `kubeproxy_` prefix. For example:
+
+| Upstream name | kubeproxy name |
+|---|---|
+| `kubernetes_secret` | `kubeproxy_secret` |
+| `kubernetes_config_map` | `kubeproxy_config_map` |
+| `kubernetes_deployment` | `kubeproxy_deployment` |
+| `data.kubernetes_resource` | `data.kubeproxy_resource` |
+
+<Warning>
+  The `kubeproxy` provider does **not** support `kubernetes_manifest` resources. The manifest resource uses a separate protocol (tfprotov5) that requires a distinct provider binary. Use the `kubectl` provider for manifest-style resources instead.
+</Warning>
+
+See [kubeproxy resources and data sources reference](/reference/kubeproxy/resources) for usage examples.

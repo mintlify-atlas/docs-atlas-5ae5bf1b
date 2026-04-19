@@ -1,0 +1,140 @@
+---
+title: "Deploy Helm charts to a private GCP cluster via IAP proxy"
+description: "Use the helmproxy Terraform provider to install Helm charts on a private GKE cluster, routing all Helm API calls through an IAP tunnel automatically."
+---
+
+The `helmproxy` provider lets you deploy Helm charts to a private GKE cluster without exposing the Kubernetes API server publicly. It starts an IAP tunnel to your bastion host during `terraform apply`, sets `KUBE_PROXY_URL` to point the Helm client at that tunnel, and tears the tunnel down when the apply completes — all transparently.
+
+<Steps>
+  <Step title="Configure the helmproxy provider block">
+    Add `helmproxy` to `required_providers` and configure the provider with your bastion host details. All five IAP arguments — `instance`, `zone`, `interface`, `project`, and `remote_port` — are required in the provider block.
+
+    ```hcl main.tf
+    terraform {
+      required_providers {
+        helmproxy = {
+          version = "~> 1.0.0"
+          source  = "example-helm.com/provider/helmproxy"
+        }
+      }
+    }
+
+    provider "helmproxy" {
+      instance    = var.instance
+      zone        = var.zone
+      interface   = var.interface
+      project     = var.project
+      remote_port = var.remote_port
+
+      kubernetes {
+        host           = ""
+        token          = data.google_service_account_access_token.kube_sa.access_token
+        config_path    = var.config_path
+        config_context = var.config_context
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Add cluster credentials via the kubernetes block">
+    The `kubernetes {}` nested block inside the `helmproxy` provider accepts the same fields as the standard `helm` provider's `kubernetes {}` block. Authenticate using a short-lived service account access token from the `google` provider.
+
+    ```hcl google.tf
+    provider "google" {}
+
+    data "google_service_account_access_token" "kube_sa" {
+      target_service_account = var.service_account
+      lifetime               = "1000s"
+      scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email"
+      ]
+    }
+    ```
+
+    Declare your input variables to keep bastion host details out of your provider block:
+
+    ```hcl variables.tf
+    variable "service_account" {
+      type        = string
+      description = "The service account to impersonate"
+    }
+
+    variable "config_path" {
+      type        = string
+      description = "The path to the kube config file"
+      default     = "~/.kube/config"
+    }
+
+    variable "config_context" {
+      type        = string
+      description = "The context to use in the kube config file"
+    }
+
+    variable "zone" {
+      type        = string
+      description = "The zone of the bastion proxy"
+    }
+
+    variable "instance" {
+      type        = string
+      description = "The instance to use for the bastion proxy"
+      default     = "rpc-bastion"
+    }
+
+    variable "interface" {
+      type        = string
+      description = "The interface to use for the bastion proxy"
+      default     = "nic0"
+    }
+
+    variable "project" {
+      type        = string
+      description = "The project of the bastion proxy"
+    }
+
+    variable "remote_port" {
+      type        = string
+      description = "The remote_port of the bastion proxy"
+      default     = 8888
+    }
+    ```
+  </Step>
+
+  <Step title="Create helmproxy_release resources">
+    `helmproxy_release` accepts the same arguments as `helm_release`. Reference your chart by path or by a Helm repository URL.
+
+    ```hcl main.tf
+    resource "helmproxy_release" "omnirpc_example" {
+      name  = "omnirpc-example"
+      chart = "../../../charts/omnirpc/"
+    }
+    ```
+
+    Any argument valid for `helm_release` — `values`, `set`, `namespace`, `create_namespace`, `wait`, `timeout`, and so on — works identically on `helmproxy_release`.
+  </Step>
+
+  <Step title="Run terraform apply">
+    Run a normal apply. The provider opens the IAP tunnel before any `helmproxy_release` resources are planned, and closes it after the apply finishes.
+
+    ```bash
+    terraform init
+    terraform apply
+    ```
+  </Step>
+</Steps>
+
+## How the proxy URL flows
+
+<Tip>
+Understanding the proxy chain helps when debugging connectivity issues:
+
+1. The `helmproxy` provider opens an IAP tunnel to your bastion host and picks a free local port (for example, `54321`).
+2. It sets `KUBE_PROXY_URL=http://localhost:54321` in the environment before making any Helm API calls.
+3. The Helm client reads `KUBE_PROXY_URL` and routes all Kubernetes API requests through that local endpoint.
+4. The local endpoint forwards traffic through the IAP tunnel to tinyproxy on the bastion host, which in turn reaches the private GKE API server.
+</Tip>
+
+<Warning>
+All five IAP parameters — `project`, `zone`, `instance`, `interface`, and `remote_port` — must be set in the `provider "helmproxy" {}` block, not on individual `helmproxy_release` resources. If any are missing, the provider will fail to start the tunnel before any resources are applied.
+</Warning>

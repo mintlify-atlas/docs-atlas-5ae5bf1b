@@ -1,0 +1,111 @@
+---
+title: 'IAP Tunnel Provider: standalone GCP proxy resource'
+description: 'The iap provider creates IAP tunnel proxy resources and keep-alive data sources for routing Terraform-managed GCP resources through a bastion host.'
+---
+
+The `iap` provider opens a Google Cloud Identity-Aware Proxy (IAP) tunnel from your local machine to a bastion host and exposes the resulting HTTP proxy to other Terraform providers. It wraps the Google provider schema directly, so you configure it with the same credentials block you already use for the `google` provider.
+
+## How it works
+
+The `iap` provider registers two new schema types on top of the Google provider:
+
+- **`iap_tunnel_proxy` (resource)** — starts a background IAP tunnel on a free local port and writes the resulting `proxy_url` (e.g. `http://localhost:PORT`) to state. The tunnel runs for the duration of the `terraform apply`.
+- **`iap_tunnel_keep_alive` (data source)** — accepts a `proxy_url` and a `timeout` in seconds, then blocks the read until the timeout elapses. Use it to hold the tunnel open after all dependent resources have finished provisioning.
+
+## Provider configuration
+
+The `iap` provider block inherits all Google provider fields. No additional top-level fields are required.
+
+```hcl terraform.tf
+terraform {
+  required_providers {
+    iap = {
+      version = "~> 1.0.0"
+      source  = "example-iap.com/provider/iap"
+    }
+  }
+}
+
+provider "iap" {}
+```
+
+## Resource: `iap_tunnel_proxy`
+
+Creates the IAP tunnel and makes the local proxy URL available to other resources.
+
+### Required fields
+
+| Field | Type | Description |
+|---|---|---|
+| `project` | string | GCP project that owns the bastion instance. |
+| `zone` | string | Zone where the bastion instance runs (e.g. `us-central1-a`). |
+| `instance` | string | Name of the bastion Compute Engine instance. |
+| `interface` | string | Network interface on the bastion to tunnel through (e.g. `nic0`). |
+| `remote_port` | number | Port on the bastion to forward traffic to. |
+
+### Computed outputs
+
+| Field | Type | Description |
+|---|---|---|
+| `proxy_url` | string | Local HTTP proxy URL, e.g. `http://localhost:54321`. |
+
+```hcl main.tf
+resource "iap_tunnel_proxy" "tunnel_proxy" {
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+}
+
+output "tunnel_proxy" {
+  value = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+}
+```
+
+## Using `proxy_url` downstream
+
+Pass `proxy_url` directly into any provider that accepts an HTTP proxy. The example below wires the tunnel into the `kubernetes` provider:
+
+```hcl main.tf
+provider "kubernetes" {
+  host           = ""
+  token          = data.google_service_account_access_token.kube_sa.access_token
+  proxy_url      = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+  config_path    = var.config_path
+  config_context = var.config_context
+}
+```
+
+## Data source: `iap_tunnel_keep_alive`
+
+Keeps the tunnel open for a fixed number of seconds. Because the tunnel terminates when `apply` ends, use this data source when subsequent steps need the proxy to remain available after dependent resources are created.
+
+```hcl main.tf
+data "iap_tunnel_keep_alive" "keep_alive" {
+  timeout   = 100
+  proxy_url = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+
+  for_each = {
+    timestamp = "${timestamp()}"
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `proxy_url` | string | The proxy URL returned by `iap_tunnel_proxy`. |
+| `timeout` | number | Seconds to hold the tunnel open. |
+| `timed_out` | bool | Computed. Set to `true` when the timeout has elapsed. |
+
+The data source also probes the proxy every 5 seconds during the wait to verify connectivity.
+
+<Warning>
+The tunnel lives only for the duration of the `terraform apply`. If you need persistent access to the cluster, consider running `gcloud compute start-iap-tunnel` outside of Terraform and pointing providers at that tunnel instead.
+</Warning>
+
+<Note>
+After starting the tunnel, the provider waits up to 5 seconds for it to become healthy before continuing. If the tunnel returns an error within that window, the apply fails immediately. Errors after the 5-second window are logged but do not stop the apply.
+</Note>

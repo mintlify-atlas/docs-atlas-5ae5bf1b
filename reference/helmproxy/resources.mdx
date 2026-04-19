@@ -1,0 +1,51 @@
+---
+title: "helmproxy_release: Helm chart deployment resource reference"
+description: "Use helmproxy_release to install or upgrade Helm charts through an IAP tunnel. Arguments are identical to the upstream helm_release resource."
+---
+
+`helmproxy_release` wraps the upstream `helm_release` resource. Every argument, attribute, and nested block accepted by `helm_release` is accepted by `helmproxy_release` without modification. The only difference is that Helm operations are routed through the IAP tunnel configured in the provider block.
+
+## Example
+
+The following example installs an OmniRPC chart using a local chart path. It matches the real example from `helmproxy/examples/main.tf`.
+
+```hcl main.tf
+resource "helmproxy_release" "omnirpc_example" {
+  name  = "omnirpc-example"
+  chart = "../../../charts/omnirpc/"
+}
+```
+
+## Key arguments
+
+<ParamField path="name" type="string" required>
+  Name of the Helm release. Must be unique within the namespace.
+</ParamField>
+
+<ParamField path="chart" type="string" required>
+  Chart to install. Accepts a local path, a repository chart name (`repo/chart`), or an OCI reference.
+</ParamField>
+
+<ParamField path="namespace" type="string">
+  Kubernetes namespace to install the release into. Defaults to `default`.
+</ParamField>
+
+<ParamField path="values" type="list(string)">
+  List of values YAML strings merged in order (left to right). Equivalent to passing `-f` to the Helm CLI.
+</ParamField>
+
+<ParamField path="set" type="block">
+  One or more `set {}` blocks for individual value overrides. Each block accepts `name` and `value`.
+</ParamField>
+
+<Note>
+  The argument list above is not exhaustive. `helmproxy_release` accepts every argument that `helm_release` does, including `repository`, `version`, `timeout`, `atomic`, `cleanup_on_fail`, `create_namespace`, and all other upstream fields.
+</Note>
+
+<Info>
+  The proxy is configured by setting `KUBE_PROXY_URL` automatically during provider initialization. You do not need to add any proxy-related fields to the `helmproxy_release` block itself.
+</Info>
+
+## Full argument reference
+
+For the complete list of arguments and computed attributes, see the official [Helm provider `helm_release` documentation](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release). All fields listed there apply directly to `helmproxy_release`.

@@ -1,0 +1,62 @@
+---
+title: "iap_tunnel_keep_alive Terraform data source reference"
+description: "Schema reference for the iap_tunnel_keep_alive Terraform data source: keep an IAP tunnel alive for a configured duration during long apply operations."
+---
+
+The `iap_tunnel_keep_alive` data source delays the Terraform read phase for a configured number of seconds, periodically testing the proxy URL to confirm the tunnel is still responsive. Use it in the same configuration as an `iap_tunnel_proxy` resource when the downstream `terraform apply` takes longer than the IAP tunnel's idle timeout — for example, during slow Helm chart deployments or large Kubernetes rollouts.
+
+## Example usage
+
+```hcl main.tf
+resource "iap_tunnel_proxy" "tunnel_proxy" {
+  zone        = var.zone
+  instance    = var.instance
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+}
+
+data "iap_tunnel_keep_alive" "keep_alive" {
+  # keep alive for at least 100 seconds
+  timeout   = 100
+  proxy_url = resource.iap_tunnel_proxy.tunnel_proxy.proxy_url
+
+  for_each = {
+    timestamp = "${timestamp()}"
+  }
+}
+```
+
+## Arguments
+
+<ParamField path="timeout" type="number" required>
+  Duration in seconds to keep the tunnel alive. The data source blocks until this many seconds have elapsed from the time the read begins, or until the Terraform context is canceled — whichever comes first.
+</ParamField>
+
+<ParamField path="proxy_url" type="string" required>
+  The proxy URL to test periodically. Use `resource.iap_tunnel_proxy.<name>.proxy_url` to reference the output of a co-located `iap_tunnel_proxy` resource. The value must be a valid URL that can be parsed by the Go `net/url` package.
+</ParamField>
+
+## Attributes
+
+<ResponseField name="timed_out" type="boolean">
+  Set to `true` once the configured `timeout` duration has elapsed. This attribute is `false` (unset) if the data source returns early due to context cancellation.
+</ResponseField>
+
+## Behavior
+
+Every 5 seconds, the data source makes a test HTTP `GET` request to `https://www.google.com/` routed through the configured `proxy_url`. The data source returns as soon as `timeout` seconds have elapsed. If the proxy test fails, the error is logged at `[ERROR]` level but the data source continues waiting — this allows the tunnel to recover from transient connectivity issues without aborting the apply.
+
+<Warning>
+  If Terraform cancels the context before the `timeout` elapses (for example, due to a user interrupt or a `-parallelism` constraint), the data source returns an error: `context was canceled`. The `timed_out` attribute will not be set in this case. Design your configuration so that downstream resources `depends_on` the keep-alive only when early cancellation is acceptable.
+</Warning>
+
+<Tip>
+  Use `for_each` with a `timestamp()` expression to force Terraform to re-evaluate the data source on every apply, even when the input arguments have not changed. Without this trick, Terraform may cache the result from a previous run and skip the keep-alive delay entirely.
+
+  ```hcl
+  for_each = {
+    timestamp = "${timestamp()}"
+  }
+  ```
+</Tip>

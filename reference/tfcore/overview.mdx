@@ -1,0 +1,35 @@
+---
+title: "tfcore: shared utilities for IAP Terraform providers"
+description: "The tfcore module provides schema composition, IAP tunnel management, and provider wrapping utilities used by all three Synapse Terraform providers."
+---
+
+The `tfcore` module (`github.com/synapsecns/sanguine/contrib/tfcore`) is the shared foundation for the Synapse IAP, Helm Proxy, and Kube Proxy Terraform providers. It handles schema merging, IAP tunnel lifecycle management, and transparent provider wrapping so that each provider can focus on its own resource logic without duplicating the tunneling and credential plumbing.
+
+## What's in tfcore
+
+The `utils` package exposes five key exports used across all three providers:
+
+- **`CombineSchemas`** — merges a Google provider schema with an underlying provider schema, renames resource and data source keys, and wraps every resource in `WrapSchemaResource`.
+- **`UpdateSchemaWithDefaults`** — adds the IAP tunnel fields (`instance`, `interface`, `remote_port`) to a merged schema and enforces that `project` and `zone` are required.
+- **`StartTunnel`** — reads tunnel configuration from `ResourceData`, selects a free local port, starts an IAP tunnel proxy in a background goroutine, and returns the `http://localhost:<port>` proxy URL.
+- **`WrapSchemaResource`** — wraps all CRUD operations on a `schema.Resource` to extract the underlying provider from the `WrappedProvider` meta interface before dispatching each call.
+- **`MustCombineMaps`** — generic map merge that panics immediately on any key overlap, making schema conflicts visible at startup rather than silently overwriting values.
+
+## Reference pages
+
+<CardGroup cols={2}>
+  <Card
+    title="Schema and tunnel utilities"
+    icon="wrench"
+    href="/reference/tfcore/schema-utilities"
+  >
+    Full reference for `CombineSchemas`, `StartTunnel`, `WrapSchemaResource`, `UpdateSchemaWithDefaults`, and `MustCombineMaps`, including signatures, parameters, and behavior notes.
+  </Card>
+  <Card
+    title="Core Library: all three providers"
+    icon="book"
+    href="/introduction"
+  >
+    See how tfcore is used by the iap, helmproxy, and kubeproxy providers to compose schemas and manage tunnels.
+  </Card>
+</CardGroup>

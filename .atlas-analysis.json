@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Synapse Terraform Providers",
+  "projectType": "infrastructure",
+  "projectName": "Synapse Terraform Providers",
+  "projectDescription": "A suite of Terraform providers for securely accessing GCP resources through Identity-Aware Proxy (IAP) tunnels, enabling Helm and Kubernetes deployments without exposing infrastructure to the public internet.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#4A6FA5",
-    "light": "#6B8EC7",
-    "dark": "#2C4A7C"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/synapsecns/tf-providers"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/synapsecns/tf-providers"
-    }
-  },
+  "primaryColor": "#4A6FA5",
+  "lightColor": "#6B8EC7",
+  "darkColor": "#2C4A7C",
   "navigation": {
     "tabs": [
       {
@@ -92,5 +80,26 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "IAP tunnel proxy for secure GCP resource access without public exposure",
+    "Helm provider wrapper that routes deployments through IAP-authenticated proxies",
+    "Kubernetes provider wrapper with transparent IAP proxy integration",
+    "Automatic tunnel lifecycle management (start/stop with Terraform apply/destroy)",
+    "Keep-alive data source to maintain tunnel connections during long-running operations",
+    "Schema combining utilities for composing multiple Terraform provider schemas",
+    "Support for GCP service account impersonation and token-based authentication"
+  ],
+  "publicApiSurface": [
+    "resource: iap_tunnel_proxy (project, zone, instance, interface, remote_port → proxy_url)",
+    "data source: iap_tunnel_keep_alive (timeout, proxy_url → timed_out)",
+    "provider: iap (wraps Google provider + IAP tunnel resources)",
+    "provider: helmproxy (wraps Helm + Google providers with IAP tunnel)",
+    "provider: kubeproxy (wraps Kubernetes + Google providers with IAP tunnel)",
+    "utils.StartTunnel(ctx, resourceData, googleConfig) → proxyURL",
+    "utils.CombineSchemas(googleProvider, underlyingProvider, toReplace, replaceWith) → CombinedSchema",
+    "utils.WrapSchemaResource(resource) → *schema.Resource",
+    "utils.UpdateSchemaWithDefaults(schemaMap) → schemaMap",
+    "utils.CombineProtoSchemas(ctx, googleSchema, protoSchema, toReplace, replaceWith) → *tfprotov5.Schema"
+  ]
 }

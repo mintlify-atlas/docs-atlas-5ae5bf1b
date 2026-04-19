@@ -1,0 +1,101 @@
+---
+title: 'Kube Proxy Provider: Kubernetes resources via IAP tunnel'
+description: 'The kubeproxy provider wraps the Kubernetes provider with an IAP tunnel, enabling secure cluster access without exposing the API server to the internet.'
+---
+
+The `kubeproxy` provider merges the Google and Kubernetes providers into a single configuration block. It opens an IAP tunnel to a GCP bastion host at configure time and injects the resulting proxy URL into the Kubernetes client before any resource operations run, giving you full `kubernetes_*` resource coverage without making the cluster API server reachable from the public internet.
+
+## How it works
+
+`kubeproxy` uses `CombineSchemas` to merge the Google provider schema with the Kubernetes provider schema. Resources and data sources from the Kubernetes provider are re-registered under the `kubeproxy_` prefix. A second provider, `ManifestProvider`, handles `kubernetes_manifest`-style resources at the protocol level using the tfprotov5 server interface.
+
+At configure time the main provider:
+
+1. Authenticates with Google using the merged schema fields.
+2. Calls `utils.StartTunnel` to open the IAP tunnel and get a local proxy URL.
+3. Calls `data.Set("proxy_url", proxyURL)` to write the URL directly into the resource data before the Kubernetes provider configures itself, so the Kubernetes client picks it up automatically.
+
+## Provider configuration
+
+IAP tunnel fields go at the top level. Kubernetes auth fields (`host`, `token`, `config_path`, `config_context`) are also top-level, not nested in a block.
+
+```hcl terraform.tf
+terraform {
+  required_providers {
+    kubeproxy = {
+      version = "~> 1.0.0"
+      source  = "example-kube.com/provider/kubeproxy"
+    }
+  }
+}
+```
+
+```hcl main.tf
+provider "kubeproxy" {
+  instance    = var.instance
+  zone        = var.zone
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+
+  host           = ""
+  token          = data.google_service_account_access_token.kube_sa.access_token
+  config_path    = var.config_path
+  config_context = var.config_context
+}
+```
+
+### Provider fields
+
+| Field | Type | Description |
+|---|---|---|
+| `project` | string | GCP project that owns the bastion instance. |
+| `zone` | string | Zone where the bastion instance runs (e.g. `us-central1-a`). |
+| `instance` | string | Name of the bastion Compute Engine instance. |
+| `interface` | string | Network interface on the bastion (e.g. `nic0`). |
+| `remote_port` | number | Port on the bastion to forward through (default `8888`). |
+| `host` | string | URL of the Kubernetes API server. |
+| `token` | string | Bearer token for cluster authentication. |
+| `config_path` | string | Path to a kubeconfig file (default `~/.kube/config`). |
+| `config_context` | string | Context name to use from the kubeconfig file. |
+
+## Resources and data sources
+
+All standard Kubernetes resources are available under the `kubeproxy_` prefix.
+
+```hcl main.tf
+resource "kubeproxy_secret" "example" {
+  metadata {
+    name = "basic-auth"
+  }
+
+  data = {
+    username = "admin"
+    password = "P4ssw0rd"
+  }
+
+  type = "kubernetes.io/basic-auth"
+}
+
+data "kubeproxy_resource" "example" {
+  api_version = "v1"
+  kind        = "ConfigMap"
+
+  metadata {
+    name      = "example"
+    namespace = "default"
+  }
+}
+
+output "test" {
+  value = data.kubeproxy_resource.example.object.data.TEST
+}
+```
+
+<Warning>
+`kubeproxy_manifest` is not compatible with the standard Kubernetes `kubernetes_manifest` resource. The manifest path uses a separate tfprotov5 provider server (`ManifestProvider`) that has different lifecycle semantics. Use the `kubectl` provider for manifest-based resources instead.
+</Warning>
+
+<Note>
+You do not need to set `proxy_url` manually. The provider calls `data.Set("proxy_url", proxyURL)` from `main_provider.go` before the Kubernetes client initializes, so the tunnel URL is injected automatically into the provider configuration.
+</Note>

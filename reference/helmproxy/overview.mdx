@@ -1,0 +1,93 @@
+---
+title: "helmproxy Terraform provider configuration reference"
+description: "Complete reference for the helmproxy Terraform provider configuration block, including all IAP tunnel fields and the Helm kubernetes nested block."
+---
+
+The `helmproxy` provider combines the Google provider schema with the Helm provider schema using `CombineSchemas`. Every `helm_` resource is available as a `helmproxy_` resource, and all Helm operations are automatically routed through an IAP tunnel to a bastion host before reaching the Kubernetes API server.
+
+## Provider arguments
+
+<ParamField path="project" type="string" required>
+  GCP project ID that contains the bastion instance. Overrides the `GOOGLE_PROJECT` environment variable.
+</ParamField>
+
+<ParamField path="zone" type="string" required>
+  GCP zone where the bastion instance is running (for example, `us-east1-b`).
+</ParamField>
+
+<ParamField path="instance" type="string" required>
+  Name of the GCE bastion instance used to open the IAP tunnel.
+</ParamField>
+
+<ParamField path="interface" type="string" default="nic0">
+  Network interface on the bastion to tunnel through.
+</ParamField>
+
+<ParamField path="remote_port" type="number" default="8888">
+  Port on the bastion where tinyproxy is listening. The default matches the tinyproxy default port.
+</ParamField>
+
+### `kubernetes` block
+
+The `kubernetes` nested block is inherited directly from the upstream Helm provider and configures how Helm connects to the cluster.
+
+<ParamField path="kubernetes.host" type="string">
+  Kubernetes API server URL. Leave empty to rely on `config_path` / `config_context`.
+</ParamField>
+
+<ParamField path="kubernetes.token" type="string">
+  Bearer token used to authenticate against the Kubernetes API server.
+</ParamField>
+
+<ParamField path="kubernetes.config_path" type="string" default="~/.kube/config">
+  Path to the kubeconfig file on disk.
+</ParamField>
+
+<ParamField path="kubernetes.config_context" type="string">
+  Context to activate from the kubeconfig file.
+</ParamField>
+
+## Example configuration
+
+```hcl provider.tf
+terraform {
+  required_providers {
+    helmproxy = {
+      version = "~> 1.0.0"
+      source  = "example-helm.com/provider/helmproxy"
+    }
+  }
+}
+
+provider "helmproxy" {
+  instance    = var.instance
+  zone        = var.zone
+  interface   = var.interface
+  project     = var.project
+  remote_port = var.remote_port
+
+  kubernetes {
+    host           = ""
+    token          = data.google_service_account_access_token.kube_sa.access_token
+    config_path    = var.config_path
+    config_context = var.config_context
+  }
+}
+```
+
+## Proxy URL injection
+
+<Note>
+  The provider automatically sets the `KUBE_PROXY_URL` environment variable after opening the IAP tunnel. You do not need to set this variable or reference it in any resource block — it is handled entirely by the provider's configure step in `provider.go`.
+</Note>
+
+## Available resources
+
+All upstream `helm_` resources and data sources are available under the `helmproxy_` prefix. For example:
+
+| Upstream name | helmproxy name |
+|---|---|
+| `helm_release` | `helmproxy_release` |
+| `data.helm_template` | `data.helmproxy_template` |
+
+See [helmproxy_release resource reference](/reference/helmproxy/resources) for a full usage example.
